@@ -1,5 +1,5 @@
 project: rnshah9/pcp
-target: pcp
+target: pmlc
 
 cmds:
   - cmd: /usr/bin/pmlc
