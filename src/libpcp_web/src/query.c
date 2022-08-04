@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2017-2022 Red Hat.
  * Copyright (c) 2020 Yushan ZHANG.
+ * Copyright (c) 2022 Shiyao CHEN.
  *
  * This library is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -99,8 +100,7 @@ skip_free_value_set(node_t *np)
     if (np->type == N_RATE || np->type == N_RESCALE || np->type == N_ABS 
 	|| np->type == N_SQRT || np->type == N_FLOOR || np->type == N_ROUND
 	|| np->type == N_LOG || np->type == N_PLUS || np->type == N_MINUS
-	|| np->type == N_STAR || np->type == N_SLASH || np->type == N_AVG
-	|| np->type == N_SUM) 
+	|| np->type == N_STAR || np->type == N_SLASH)
 	return 0;
     return 1;
 }
@@ -127,6 +127,12 @@ freeSeriesQueryNode(node_t *np, int level)
 	    sdsfree(np->value_set.series_values[i].sid->name);
 	    free(np->value_set.series_values[i].sid);
 	    free(np->value_set.series_values[i].series_sample);
+	    sdsfree(np->value_set.series_values[i].series_desc.indom);
+	    sdsfree(np->value_set.series_values[i].series_desc.pmid);
+	    sdsfree(np->value_set.series_values[i].series_desc.semantics);
+	    sdsfree(np->value_set.series_values[i].series_desc.source);
+	    sdsfree(np->value_set.series_values[i].series_desc.type);
+	    sdsfree(np->value_set.series_values[i].series_desc.units);
 	}
 	free(np->value_set.series_values);
     }
@@ -2083,7 +2089,7 @@ series_store_metric_name(seriesQueryBaton *baton, series_sample_set_t *sample_se
 	if (reply->type == REDIS_REPLY_STRING) {
 	    sdsclear(key);
 	    key = sdscatlen(key, reply->str, reply->len);
-	    if ((entry = redisMapLookup(namesmap, key)) != NULL){
+	    if ((entry = redisMapLookup(namesmap, key)) != NULL) {
 		sample_set->metric_name = redisMapValue(entry);
 	    } else {
 		infofmt(msg, "%s - timeseries string map", series);
@@ -2348,9 +2354,26 @@ series_expr_canonical(node_t *np, int idx)
 	break;
 
     case N_AVG:
+    case N_AVG_INST:
+    case N_AVG_SAMPLE:
     case N_SUM:
+    case N_SUM_INST:
+    case N_SUM_SAMPLE:
+    case N_STDEV_INST:
+    case N_STDEV_SAMPLE:
+    case N_TOPK_INST:
+    case N_TOPK_SAMPLE:
+    case N_NTH_PERCENTILE_INST:
+    case N_NTH_PERCENTILE_SAMPLE:
+	left = series_expr_canonical(np->left, idx);
+	right = series_expr_canonical(np->right, idx);
+	break;
     case N_MAX:
+    case N_MAX_INST:
+    case N_MAX_SAMPLE:
     case N_MIN:
+    case N_MIN_INST:
+    case N_MIN_SAMPLE:
     case N_RATE:
     case N_ABS:
     case N_FLOOR:
@@ -2386,6 +2409,12 @@ series_expr_canonical(node_t *np, int idx)
     case N_AVG:
 	statement = sdscatfmt(sdsempty(), "avg(%S)", left);
 	break;
+    case N_AVG_INST:
+	statement = sdscatfmt(sdsempty(), "avg_inst(%S)", left);
+	break;
+    case N_AVG_SAMPLE:
+	statement = sdscatfmt(sdsempty(), "avg_sample(%S)", left);
+	break;
     case N_COUNT:
 	statement = sdscatfmt(sdsempty(), "count(%S)", left);
 	break;
@@ -2394,11 +2423,47 @@ series_expr_canonical(node_t *np, int idx)
     case N_MAX:
 	statement = sdscatfmt(sdsempty(), "max(%S)", left);
 	break;
+    case N_MAX_INST:
+	statement = sdscatfmt(sdsempty(), "max_inst(%S)", left);
+	break;
+    case N_MAX_SAMPLE:
+	statement = sdscatfmt(sdsempty(), "max_sample(%S)", left);
+	break;
     case N_MIN:
 	statement = sdscatfmt(sdsempty(), "min(%S)", left);
 	break;
+    case N_MIN_INST:
+	statement = sdscatfmt(sdsempty(), "min_inst(%S)", left);
+	break;
+    case N_MIN_SAMPLE:
+	statement = sdscatfmt(sdsempty(), "min_sample(%S)", left);
+	break;
     case N_SUM:
 	statement = sdscatfmt(sdsempty(), "sum(%S)", left);
+	break;
+    case N_SUM_INST:
+	statement = sdscatfmt(sdsempty(), "sum_inst(%S)", left);
+	break;
+    case N_SUM_SAMPLE:
+	statement = sdscatfmt(sdsempty(), "sum_sample(%S)", left);
+	break;
+    case N_STDEV_INST:
+	statement = sdscatfmt(sdsempty(), "stdev_inst(%S)", left);
+	break;
+    case N_STDEV_SAMPLE:
+	statement = sdscatfmt(sdsempty(), "stdev_sample(%S)", left);
+	break;
+    case N_TOPK_INST:
+	statement = sdscatfmt(sdsempty(), "topk_inst(%S, %S)", left, right);
+	break;
+    case N_TOPK_SAMPLE:
+	statement = sdscatfmt(sdsempty(), "topk_sample(%S, %S)", left, right);
+        break;
+    case N_NTH_PERCENTILE_INST:
+	statement = sdscatfmt(sdsempty(), "nth_percentile_inst(%S, %S)", left, right);
+	break;
+    case N_NTH_PERCENTILE_SAMPLE:
+	statement = sdscatfmt(sdsempty(), "nth_percentile_inst(%S, %S)", left, right);
 	break;
     case N_ANON:
 	break;
@@ -2624,6 +2689,71 @@ series_calculate_rate(node_t *np)
 }
 
 /*
+ * Compare and pick the max instance value(s) among samples.
+ */
+static void
+series_calculate_time_domain_max(node_t *np)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k;
+    double		max_data, data;
+    int			max_pointer;
+    sds			msg;
+    pmSeriesValue	inst;
+
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	if (n_samples > 0) {
+	    np->value_set.series_values[i].num_samples = n_samples;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(n_samples, sizeof(series_instance_set_t));
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+
+	    for (j = 0; j < n_samples; j++) {
+		np->value_set.series_values[i].series_sample[j].num_instances = 1;
+		np->value_set.series_values[i].series_sample[j].series_instance = (pmSeriesValue *)calloc(1, sizeof(pmSeriesValue));
+
+		max_pointer = 0;
+		max_data = atof(np->left->value_set.series_values[i].series_sample[j].series_instance[0].data);
+		for (k = 1; k < n_instances; k++) {
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+			continue;
+		    }                
+		    data = atof(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data);
+		    if (max_data < data) {
+			max_data = data;
+			max_pointer = k;
+		    }
+		}
+		inst = np->left->value_set.series_values[i].series_sample[j].series_instance[max_pointer];
+
+		np->value_set.series_values[i].series_sample[j].series_instance[0].timestamp = sdsnew(inst.timestamp);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].series = sdsnew(inst.series);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].data = sdsnew(inst.data);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].ts = inst.ts;
+	    }
+        } else {
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew(np->left->value_set.series_values[i].series_desc.semantics);
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew(np->left->value_set.series_values[i].series_desc.type);
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+    }
+}
+
+/*
  * Compare and pick the maximal instance value(s) among samples for each metric.
  */
 static void
@@ -2678,7 +2808,77 @@ series_calculate_max(node_t *np)
 	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
 	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
 	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
-	np->value_set.series_values[i].series_desc = np->left->value_set.series_values[i].series_desc;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew(np->left->value_set.series_values[i].series_desc.semantics);
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew(np->left->value_set.series_values[i].series_desc.type);
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+    }
+}
+
+/*
+ * Compare and pick the minimal value(s) among samples for each metric across time.
+ */
+static void
+series_calculate_time_domain_min(node_t *np)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k;
+    double		min_data, data;
+    int			min_pointer;
+    sds			msg;
+    pmSeriesValue	inst;
+
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	if (n_samples > 0) {
+	    np->value_set.series_values[i].num_samples = n_samples;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(n_samples, sizeof(series_instance_set_t));
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+
+	    for (j = 0; j < n_samples; j++) {
+		np->value_set.series_values[i].series_sample[j].num_instances = 1;
+		np->value_set.series_values[i].series_sample[j].series_instance = (pmSeriesValue *)calloc(1, sizeof(pmSeriesValue));
+
+		min_pointer = 0;
+		min_data = atof(np->left->value_set.series_values[i].series_sample[j].series_instance[0].data);
+		for (k = 1; k < n_instances; k++) {
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+			continue;
+		    }                
+		    data = atof(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data);
+		    if (min_data > data) {
+			min_data = data;
+			min_pointer = k;
+		    }
+		}
+		inst = np->left->value_set.series_values[i].series_sample[j].series_instance[min_pointer];
+
+		np->value_set.series_values[i].series_sample[j].series_instance[0].timestamp = sdsnew(inst.timestamp);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].series = sdsnew(inst.series);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].data = sdsnew(inst.data);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].ts = inst.ts;
+	    }
+        } else {
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew(np->left->value_set.series_values[i].series_desc.semantics);
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew(np->left->value_set.series_values[i].series_desc.type);
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
     }
 }
 
@@ -2737,7 +2937,12 @@ series_calculate_min(node_t *np)
 	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
 	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
 	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
-	np->value_set.series_values[i].series_desc = np->left->value_set.series_values[i].series_desc;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew(np->left->value_set.series_values[i].series_desc.semantics);
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew(np->left->value_set.series_values[i].series_desc.type);
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
     }
 }
 
@@ -2973,6 +3178,553 @@ series_calculate_abs(node_t *np)
 }
 
 /*
+ * calculate top k instances among samples
+ */
+static void
+series_calculate_time_domain_topk(node_t *np)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k, l;
+    sds			msg;
+    pmSeriesValue	inst;
+    int			n, ind;
+    double		data;
+    double		*topk_data;
+    int			*topk_pointer;
+
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	if (n_samples > 0){
+	    np->value_set.series_values[i].num_samples = n_samples;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(n_samples, sizeof(series_instance_set_t));
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+
+	    for (j = 0; j < n_samples; j++){
+		sscanf(np->right->value, "%d", &n);
+		if (n > n_instances){
+		    n = n_instances;
+		}
+		topk_data = (double*) calloc(n, sizeof(double));
+		topk_pointer = (int*) calloc(n, sizeof(int));
+		np->value_set.series_values[i].series_sample[j].num_instances = n;
+		np->value_set.series_values[i].series_sample[j].series_instance = (pmSeriesValue *)calloc(n, sizeof(pmSeriesValue));
+
+		for (k = 0; k < n_instances; k++){
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+		    continue;
+		    }                
+		    data = strtod(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data, NULL);
+		    if (data > topk_data[n-1]){
+			for (l = 0; l < n; ++l){
+			    if (data > topk_data[l]){
+				// insert in to position l
+				for (ind = n - 1; ind > l; --ind){
+				    topk_data[ind] = topk_data[ind-1];
+				    topk_pointer[ind] = topk_pointer[ind-1];
+				}
+				topk_data[l] = data;
+				topk_pointer[l] = k;
+			    	break;
+			    }
+			}
+		    }
+		}
+
+		for (l = 0; l < n; ++l){
+		    inst = np->left->value_set.series_values[i].series_sample[j].series_instance[topk_pointer[l]];
+		    np->value_set.series_values[i].series_sample[j].series_instance[l].timestamp = sdsnew(inst.timestamp);
+		    np->value_set.series_values[i].series_sample[j].series_instance[l].series = sdsnew(inst.series);
+		    np->value_set.series_values[i].series_sample[j].series_instance[l].data = sdsnew(inst.data);
+		    np->value_set.series_values[i].series_sample[j].series_instance[l].ts = inst.ts;       
+		}
+		free(topk_data);
+		free(topk_pointer);
+	    }
+	}
+	else{
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew("instance");
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew("double");
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+    }
+
+}
+/*
+ * calculate top k series per-instance over time samples
+ */
+static void
+series_calculate_topk(node_t *np)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k, l;
+    double		data;
+    int 		n, ind;
+    double		*topk_data;
+    int			*topk_pointer;
+    sds			msg;
+    pmSeriesValue	inst;
+
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	sscanf(np->right->value, "%d", &n);
+	if (n > n_samples){
+	    n = n_samples;
+	}
+	if (n_samples > 0) {
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+	    np->value_set.series_values[i].num_samples = n_instances;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(n_instances, sizeof(series_instance_set_t));
+	    topk_data = (double*) calloc(n, sizeof(double));
+	    topk_pointer = (int*) calloc(n, sizeof(int));
+	    for (j = 0; j < n_instances; j++){
+		np->value_set.series_values[i].series_sample[j].num_instances = n;
+		np->value_set.series_values[i].series_sample[j].series_instance = (pmSeriesValue *)calloc(n, sizeof(pmSeriesValue));
+	    }
+	    for (k = 0; k < n_instances; k++) {
+		memset(topk_data, 0, sizeof(*topk_data));
+		for (j = 0; j < n_samples; j++) {
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+			continue;
+		    }
+		    data = atof(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data);
+		    if (data > topk_data[n-1]){
+			for (l = 0; l < n; ++l){
+			    if (data > topk_data[l]){
+				// insert in to position l
+				for (ind = n - 1; ind > l; --ind){
+				    topk_data[ind] = topk_data[ind-1];
+				    topk_pointer[ind] = topk_pointer[ind-1];
+				}
+				topk_data[l] = data;
+				topk_pointer[l] = j;
+			    	break;
+			    }
+			}
+		    }
+		}		
+		for (l = 0; l < n; ++l){
+		    inst = np->left->value_set.series_values[i].series_sample[topk_pointer[l]].series_instance[k];
+		    np->value_set.series_values[i].series_sample[k].series_instance[l].timestamp = sdsnew(inst.timestamp);
+		    np->value_set.series_values[i].series_sample[k].series_instance[l].series = sdsnew(inst.series);
+		    np->value_set.series_values[i].series_sample[k].series_instance[l].data = sdsnew(inst.data);
+		    np->value_set.series_values[i].series_sample[k].series_instance[l].ts = inst.ts;
+		}
+	    }
+	    free(topk_data);
+	    free(topk_pointer);
+	} else {
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew("instance");
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew("double");
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+    }
+}
+
+/*
+ * calculate standard deviation series per-instance over time samples
+ */
+static void
+series_calculate_time_domain_standard_deviation(node_t *np)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k;
+    double		sum_data, mean, sd, data;
+    sds			msg;
+    pmSeriesValue	inst;
+    char		stdev[64];
+
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	if (n_samples > 0) {
+	    np->value_set.series_values[i].num_samples = n_samples;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(n_samples, sizeof(series_instance_set_t));
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+
+	    for (j = 0; j < n_samples; j++) {
+		np->value_set.series_values[i].series_sample[j].num_instances = 1;
+		np->value_set.series_values[i].series_sample[j].series_instance = (pmSeriesValue *)calloc(1, sizeof(pmSeriesValue));
+		sum_data = 0.0;
+		for (k = 0; k < n_instances; k++) {
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+		    continue;
+		    }
+		    data = strtod(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data, NULL);
+		    sum_data += data;
+		}
+
+		mean = sum_data/n_instances;
+		sd = 0.0;
+		for (k = 0; k < n_instances; k++) {
+		    data = strtod(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data, NULL);
+		    sd += pow(data - mean, 2);
+		}
+
+		pmsprintf(stdev, sizeof(stdev), "%le", sqrt(sd / n_instances));
+		inst = np->left->value_set.series_values[i].series_sample[j].series_instance[0];
+		np->value_set.series_values[i].series_sample[j].series_instance[0].timestamp = sdsnew(inst.timestamp);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].series = sdsnew(0);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].data = sdsnew(stdev);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].ts = inst.ts;
+	    }
+	} else {
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew("instance");
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew("double");
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+    }
+}
+
+/*
+ * calculate standard deviation series per-instance over time samples
+ */
+static void
+series_calculate_standard_deviation(node_t *np)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k;
+    double		sum_data, data, sd, mean;
+    char		stdev[64];
+    sds			msg;
+    pmSeriesValue       inst;
+
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	if (n_samples > 0) {
+	    np->value_set.series_values[i].num_samples = 1;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(1, sizeof(series_instance_set_t));
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+	    np->value_set.series_values[i].series_sample[0].num_instances = n_instances;
+	    np->value_set.series_values[i].series_sample[0].series_instance = (pmSeriesValue *)calloc(n_instances, sizeof(pmSeriesValue));
+	    for (k = 0; k < n_instances; k++) {
+		sum_data = 0.0;
+		for (j = 0; j < n_samples; j++) {
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+			continue;
+		    }
+		    data = strtod(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data, NULL);
+		    sum_data += data;
+		}
+		mean = sum_data/n_samples;
+		sd = 0.0;
+		for (j = 0; j < n_samples; j++) {
+		    data = strtod(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data, NULL);
+		    sd += pow(data - mean, 2);
+		}
+		pmsprintf(stdev, sizeof(stdev), "%le", sqrt(sd / n_samples));
+		inst = np->left->value_set.series_values[i].series_sample[0].series_instance[k];
+		np->value_set.series_values[i].series_sample[0].series_instance[k].timestamp = sdsnew(inst.timestamp);
+		np->value_set.series_values[i].series_sample[0].series_instance[k].series = sdsnew(inst.series);
+		np->value_set.series_values[i].series_sample[0].series_instance[k].data = sdsnew(stdev);
+		np->value_set.series_values[i].series_sample[0].series_instance[k].ts = inst.ts;
+	    }
+	} else {
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew("instance");
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew("double");
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+    }
+}
+
+/*
+ * calculate the nth percentile in the time series for each sample across time
+ */
+static void
+series_calculate_time_domain_nth_percentile(node_t *np)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k, l, m;
+    int			n, instance_idx, rank, *n_pointer;
+    double              *n_data, data, rank_d;
+    sds			msg;
+    pmSeriesValue       inst;
+
+    sscanf(np->right->value, "%d", &n);
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	if (n_samples > 0) {
+	    np->value_set.series_values[i].num_samples = n_samples;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(n_samples, sizeof(series_instance_set_t));
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+	    rank_d = ((double)n/100 * n_instances);
+	    rank = (int) rank_d;
+	    for (j = 0; j < n_samples; j++) {
+		np->value_set.series_values[i].series_sample[j].num_instances = 1;
+		np->value_set.series_values[i].series_sample[j].series_instance = (pmSeriesValue *)calloc(1, sizeof(pmSeriesValue));
+		n_data = (double*) calloc(n_instances, sizeof(double));
+		n_pointer = (int*) calloc(n_instances, sizeof(int)); 
+
+		for (k = 0; k < n_instances; k++) {
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+			continue;
+		    }
+		    data = strtod(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data, NULL);
+		    for (l = 0; l < n_instances; ++l){
+			if (data > n_data[l]){
+			    for (m = n_instances - 1; m > l; --m){
+				n_data[m] = n_data[m-1];
+				n_pointer[m] = n_pointer[m-1];
+			    }
+			    n_data[l] = data;
+			    n_pointer[l] = k;
+			    break;
+			}
+		    }
+		}
+
+		if (rank == n_instances) {
+		    instance_idx = n_pointer[0];
+		} else {
+		    instance_idx = n_pointer[n_instances-1-rank];
+		}
+		inst = np->left->value_set.series_values[i].series_sample[j].series_instance[instance_idx];
+		np->value_set.series_values[i].series_sample[j].series_instance[0].timestamp = sdsnew(inst.timestamp);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].series = sdsnew(inst.series);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].data = sdsnew(inst.data);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].ts = inst.ts;
+		free(n_data);
+		free(n_pointer);
+	    }
+	} else {
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew(np->left->value_set.series_values[i].series_desc.semantics);
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew(np->left->value_set.series_values[i].series_desc.type);
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+    }
+}
+
+/*
+ * calculate the nth percentile series per-instance over time samples
+ */
+static void
+series_calculate_nth_percentile(node_t *np)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k, l, m;
+    int			n, instance_idx, rank, *n_pointer;
+    double              *n_data, data, rank_d;
+    sds			msg;
+    pmSeriesValue       inst;
+
+    sscanf(np->right->value, "%d", &n);
+
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	if (n_samples > 0) {
+	    np->value_set.series_values[i].num_samples = 1;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(1, sizeof(series_instance_set_t));
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+	    np->value_set.series_values[i].series_sample[0].num_instances = n_instances;
+	    np->value_set.series_values[i].series_sample[0].series_instance = (pmSeriesValue *)calloc(n_instances, sizeof(pmSeriesValue));
+	    rank_d = ((double)n/100 * n_samples);
+	    rank = (int) rank_d;
+	    for (k = 0; k < n_instances; k++) {
+		n_data = (double*) calloc(n_samples, sizeof(double));
+		n_pointer = (int*) calloc(n_samples, sizeof(int)); 
+
+		for (j = 1; j < n_samples; j++) {
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+			continue;
+		    }
+		    data = atof(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data);
+		    for (l = 0; l < n_samples; ++l){
+			if (data > n_data[l]) {
+			    for (m = n_samples - 1; m > l; --m){
+				n_data[m] = n_data[m-1];
+				n_pointer[m] = n_pointer[m-1];
+			    }
+			    n_data[l] = data;
+			    n_pointer[l] = j;
+			    break;
+			}
+		    }
+		}
+		if (rank == n_samples) {
+		    instance_idx = n_pointer[0];
+		} else {
+		    instance_idx = n_pointer[n_samples-1-rank];
+		}
+		inst = np->left->value_set.series_values[i].series_sample[instance_idx].series_instance[k];
+		np->value_set.series_values[i].series_sample[0].series_instance[k].timestamp = sdsnew(inst.timestamp);
+		np->value_set.series_values[i].series_sample[0].series_instance[k].series = sdsnew(inst.series);
+		np->value_set.series_values[i].series_sample[0].series_instance[k].data = sdsnew(inst.data);
+		np->value_set.series_values[i].series_sample[0].series_instance[k].ts = inst.ts;
+		free(n_data);
+		free(n_pointer);
+	    }
+	} else {
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.semantics = sdsnew(np->left->value_set.series_values[i].series_desc.semantics);
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew(np->left->value_set.series_values[i].series_desc.type);
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+    }
+}
+
+/*
+ * calculate sum or avg in the time series for each sample across time
+ */
+static void
+series_calculate_time_domain_statistical(node_t *np, nodetype_t func)
+{
+    seriesQueryBaton	*baton = (seriesQueryBaton *)np->baton;
+    unsigned int	n_series, n_samples, n_instances, i, j, k;
+    double		sum_data, data;
+    char		sum_data_str[64];
+    sds			msg;
+
+    assert(func == N_SUM_SAMPLE || func == N_AVG_SAMPLE);
+
+    n_series = np->left->value_set.num_series;
+    np->value_set.num_series = n_series;
+    np->value_set.series_values = (series_sample_set_t *)calloc(n_series, sizeof(series_sample_set_t));
+    for (i = 0; i < n_series; i++) {
+	n_samples = np->left->value_set.series_values[i].num_samples;
+	if (n_samples > 0) {
+	    np->value_set.series_values[i].num_samples = n_samples;
+	    np->value_set.series_values[i].series_sample = (series_instance_set_t *)calloc(n_samples, sizeof(series_instance_set_t));
+	    n_instances = np->left->value_set.series_values[i].series_sample[0].num_instances;
+	    for (j = 0; j < n_samples; j++) {
+		np->value_set.series_values[i].series_sample[j].num_instances = 1;
+		np->value_set.series_values[i].series_sample[j].series_instance = (pmSeriesValue *)calloc(1, sizeof(pmSeriesValue));
+		
+		sum_data = 0.0;
+		for (k = 0; k < n_instances; k++) {
+		    if (np->left->value_set.series_values[i].series_sample[j].num_instances != n_instances) {
+			if (pmDebugOptions.query && pmDebugOptions.desperate) {
+			    infofmt(msg, "number of instances in each sample are not equal\n");
+			    batoninfo(baton, PMLOG_ERROR, msg);
+			}
+			continue;
+		    }
+		    data = strtod(np->left->value_set.series_values[i].series_sample[j].series_instance[k].data, NULL);
+		    sum_data += data;
+		}
+		np->value_set.series_values[i].series_sample[j].series_instance[0].timestamp = 
+			sdsnew(np->left->value_set.series_values[i].series_sample[j].series_instance[0].timestamp);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].series = 
+			sdsnew(0);
+		switch (func) {
+		case N_SUM_SAMPLE:
+		    pmsprintf(sum_data_str, sizeof(sum_data_str), "%le", sum_data);
+		    break;
+		case N_AVG_SAMPLE:
+		    pmsprintf(sum_data_str, sizeof(sum_data_str), "%le", sum_data / n_instances);
+		    break;
+		default:
+		    /* .. TODO: standard deviation, variance, mode, median, etc */
+		    sum_data_str[0] = '\0';	/* for coverity */
+		    assert(0);
+		    break;
+		}
+
+		np->value_set.series_values[i].series_sample[j].series_instance[0].data = sdsnew(sum_data_str);
+		np->value_set.series_values[i].series_sample[j].series_instance[0].ts = 
+		np->left->value_set.series_values[i].series_sample[j].series_instance[0].ts;
+	    }
+	} else {
+	    np->value_set.series_values[i].num_samples = 0;
+	}
+	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
+	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
+	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
+	np->value_set.series_values[i].series_desc.type = sdsnew("double");
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+
+	if (func == N_AVG_SAMPLE) {
+	    np->value_set.series_values[i].series_desc.semantics = sdsnew("instance");
+	} else {
+	    np->value_set.series_values[i].series_desc.semantics = sdsnew(np->left->value_set.series_values[i].series_desc.semantics);
+	}
+    }
+}
+
+/*
  * calculate sum or avg series per-instance over time samples
  */
 static void
@@ -2984,7 +3736,7 @@ series_calculate_statistical(node_t *np, nodetype_t func)
     char		sum_data_str[64];
     sds			msg;
 
-    assert(func == N_SUM || func == N_AVG);
+    assert(func == N_SUM || func == N_AVG || func == N_SUM_INST || func == N_AVG_INST);
 
     n_series = np->left->value_set.num_series;
     np->value_set.num_series = n_series;
@@ -3016,9 +3768,11 @@ series_calculate_statistical(node_t *np, nodetype_t func)
 			sdsnew(np->left->value_set.series_values[i].series_sample[0].series_instance[k].series);
 		switch (func) {
 		case N_SUM:
+		case N_SUM_INST:
 		    pmsprintf(sum_data_str, sizeof(sum_data_str), "%le", sum_data);
 		    break;
 		case N_AVG:
+		case N_AVG_INST:
 		    pmsprintf(sum_data_str, sizeof(sum_data_str), "%le", sum_data / n_samples);
 		    break;
 		default:
@@ -3038,11 +3792,18 @@ series_calculate_statistical(node_t *np, nodetype_t func)
 	np->value_set.series_values[i].sid = (seriesGetSID *)calloc(1, sizeof(seriesGetSID));
 	np->value_set.series_values[i].sid->name = sdsnew(np->left->value_set.series_values[i].sid->name);
 	np->value_set.series_values[i].baton = np->left->value_set.series_values[i].baton;
-	np->value_set.series_values[i].series_desc = np->left->value_set.series_values[i].series_desc;
 
-	/* statistical result values are type double, but maybe this depends on the function and args */
-	sdsfree(np->value_set.series_values[i].series_desc.type);
+	np->value_set.series_values[i].series_desc.indom = sdsnew(np->left->value_set.series_values[i].series_desc.indom);
+	np->value_set.series_values[i].series_desc.pmid = sdsnew(np->left->value_set.series_values[i].series_desc.pmid);
+	np->value_set.series_values[i].series_desc.source = sdsnew(np->left->value_set.series_values[i].series_desc.source);
 	np->value_set.series_values[i].series_desc.type = sdsnew("double");
+	np->value_set.series_values[i].series_desc.units = sdsnew(np->left->value_set.series_values[i].series_desc.units);
+	
+	if (func == N_AVG || func == N_AVG_INST) {
+	    np->value_set.series_values[i].series_desc.semantics = sdsnew("instance");
+	} else {
+	    np->value_set.series_values[i].series_desc.semantics = sdsnew(np->left->value_set.series_values[i].series_desc.semantics);
+	}
     }
 }
 
@@ -3938,68 +4699,94 @@ series_calculate(seriesQueryBaton *baton, node_t *np, int level)
 	return sts;
 
     np->baton = baton;
-    switch (np->type) {
+    switch ((sts = np->type)) {
 	case N_RATE:
 	    series_calculate_rate(np);
-	    sts = N_RATE;
 	    break;
 	case N_MAX:
+	case N_MAX_INST:
 	    series_calculate_max(np);
-	    sts = N_MAX;
+	    break;
+	case N_MAX_SAMPLE:
+	    series_calculate_time_domain_max(np);
 	    break;
 	case N_MIN:
+	case N_MIN_INST:
 	    series_calculate_min(np);
-	    sts = N_MIN;
+	    break;
+	case N_MIN_SAMPLE:
+	    series_calculate_time_domain_min(np);
 	    break;
 	case N_RESCALE:
 	    series_calculate_rescale(np);
-	    sts = N_RESCALE;
 	    break;
 	case N_ABS:
 	    series_calculate_abs(np);
-	    sts = N_ABS;
 	    break;
 	case N_FLOOR:
 	    series_calculate_floor(np);
-	    sts = N_FLOOR;
 	    break;
 	case N_LOG:
 	    series_calculate_log(np);
-	    sts = N_LOG;
 	    break;
 	case N_SQRT:
 	    series_calculate_sqrt(np);
-	    sts = N_SQRT;
 	    break;
 	case N_ROUND:
 	    series_calculate_round(np);
-	    sts = N_ROUND;
 	    break;
 	case N_PLUS:
 	    series_calculate_plus(np);
-	    sts = N_PLUS;
 	    break;
 	case N_MINUS:
 	    series_calculate_minus(np);
-	    sts = N_MINUS;
 	    break;
 	case N_STAR:
 	    series_calculate_star(np);
-	    sts = N_STAR;
 	    break;
 	case N_SLASH:
 	    series_calculate_slash(np);
-	    sts = N_SLASH;
 	    break;
 	case N_AVG:
 	    series_calculate_statistical(np, N_AVG);
-	    sts = N_AVG;
+	    break;
+	case N_AVG_INST:
+	    series_calculate_statistical(np, N_AVG_INST);
+		sts = N_AVG_INST;
+	    break;
+	case N_AVG_SAMPLE:
+	    series_calculate_time_domain_statistical(np, N_AVG_SAMPLE);
+	    sts = N_AVG_SAMPLE;
 	    break;
 	case N_SUM:
 	    series_calculate_statistical(np, N_SUM);
-	    sts = N_SUM;
+	    break;
+	case N_SUM_INST:
+	    series_calculate_statistical(np, N_SUM_INST);
+	    break;
+	case N_SUM_SAMPLE:
+	    series_calculate_time_domain_statistical(np, N_SUM_SAMPLE);
+	    break;
+	case N_STDEV_INST:
+	    series_calculate_standard_deviation(np);
+	    break;
+	case N_STDEV_SAMPLE:
+	    series_calculate_time_domain_standard_deviation(np);
+	    break;
+	case N_TOPK_INST:
+	    series_calculate_topk(np);
+	    break;
+	case N_TOPK_SAMPLE:
+	    series_calculate_time_domain_topk(np);
+            break;
+	case N_NTH_PERCENTILE_INST:
+	    series_calculate_nth_percentile(np);
+	    break;
+	case N_NTH_PERCENTILE_SAMPLE:
+	    series_calculate_time_domain_nth_percentile(np);
 	    break;
 	default:
+	    sts = 0;	/* no function */
 	    break;
     }
     return sts;
@@ -4008,9 +4795,9 @@ series_calculate(seriesQueryBaton *baton, node_t *np, int level)
 static int
 check_compatibility(pmUnits *units_a, pmUnits *units_b)
 {
-    if (compare_pmUnits_dim(units_a, units_b) == 0) {
+    if (compare_pmUnits_dim(units_a, units_b) == 0)
 	return 0;
-    } else return -1;
+    return -1;
 }
 
 static void
@@ -5234,7 +6021,8 @@ series_query_mapping_callback(
 }
 
 static void
-series_query_mapping(void *arg){
+series_query_mapping(void *arg)
+{
     seriesQueryBaton	*baton = (seriesQueryBaton *)arg;
     sds			cmd, key;
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 Red Hat.
+ * Copyright (c) 2017-2022 Red Hat.
  *
  * This library is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -1713,10 +1713,11 @@ pmSeriesClose(pmSeriesModule *module)
     seriesModuleData	*data = (seriesModuleData *)module->privdata;
 
     if (data) {
-	if (!data->shareslots)
+	if (data->slots && !data->shareslots)
 	    redisSlotsFree(data->slots);
 	memset(data, 0, sizeof(seriesModuleData));
 	free(data);
+	module->privdata = NULL;
     }
 }
 
@@ -1974,6 +1975,10 @@ pmDiscoverSetup(pmDiscoverModule *module, pmDiscoverCallBacks *cbs, void *arg)
 	    return 0;
     }
 
+    /* see if an alternate archive directory is sought */
+    if ((option = pmIniFileLookup(config, "discover", "path")))
+	logdir = option;
+
     /* prepare for optional metric and indom exclusion */
     if ((option = pmIniFileLookup(config, "discover", "exclude.metrics"))) {
 	if ((data->pmids = dictCreate(&intKeyDictCallBacks, NULL)) == NULL)
@@ -2032,7 +2037,7 @@ pmDiscoverClose(pmDiscoverModule *module)
 
     if (discover) {
 	pmDiscoverUnregister(discover->handle);
-	if (!discover->shareslots)
+	if (discover->slots && !discover->shareslots)
 	    redisSlotsFree(discover->slots);
 	for (i = 0; i < discover->exclude_names; i++)
 	    sdsfree(discover->patterns[i]);

@@ -132,6 +132,8 @@ pmDiscoverFree(pmDiscover *p)
 	close(p->fd);
     if (p->context.name)
 	sdsfree(p->context.name);
+    if (p->context.hostname)
+	sdsfree(p->context.hostname);
     if (p->context.source)
 	sdsfree(p->context.source);
     if (p->context.labelset)
@@ -139,7 +141,6 @@ pmDiscoverFree(pmDiscover *p)
     if (p->event_handle) {
 	uv_fs_event_stop(p->event_handle);
 	free(p->event_handle);
-	p->event_handle = NULL;
     }
 
     memset(p, 0, sizeof(*p));
@@ -579,8 +580,11 @@ static void changed_callback(pmDiscover *); /* fwd decl */
 static void
 created_callback(pmDiscover *p)
 {
-    if (p->flags & (PM_DISCOVER_FLAGS_COMPRESSED|PM_DISCOVER_FLAGS_INDEX))
-    	return; /* compressed archives don't grow and we ignore archive index files */
+    if (p->flags &
+	(PM_DISCOVER_FLAGS_DELETED| /* fsevents race: creating and deleting */
+	 PM_DISCOVER_FLAGS_COMPRESSED| /* compressed archives do not grow */
+	 PM_DISCOVER_FLAGS_INDEX))        /* ignore archive index files */
+	return;
 
     if (pmDebugOptions.discovery)
 	fprintf(stderr, "CREATED %s, %s\n", p->context.name, pmDiscoverFlagsStr(p));
@@ -805,8 +809,8 @@ pmDiscoverInvokeInDomCallBacks(pmDiscover *p, int type, __pmTimestamp *tsp, pmIn
 	    __pmHashNode	*hp;
 	    __pmLogInDom	*idp;
 	    int			bad = 0;
-	    char		**dupnamelist;		/* DEBUG */
-	    int			*dupinstlist;		/* DEBUG */
+	    char		**dupnamelist = NULL;	/* DEBUG */
+	    int			*dupinstlist = NULL;	/* DEBUG */
 
 	    if ((hp = __pmHashSearch((unsigned int)in->indom, &acp->ac_log->hashindom)) == NULL) {
 		fprintf(stderr, "pmDiscoverInvokeInDomCallBacks: Botch:  indom %s search failed\n",
@@ -962,12 +966,10 @@ pmDiscoverInvokeInDomCallBacks(pmDiscover *p, int type, __pmTimestamp *tsp, pmIn
 	    }
 	}
 	/*
-	 * components of duplid are stashed away in hashed indom
-	 * structures, so just duplid and duplid->instlist to be
-	 * free'd here
+	 * components of duplid are stashed away in libpcp archive hashed
+	 * indom structures, so just duplid to be free'd here
 	 */
 	if (duplid != NULL) {
-	    free(duplid->instlist);
 	    free(duplid);
 	    duplid = NULL;
 	}
@@ -1293,11 +1295,13 @@ process_metadata(pmDiscover *p)
 		break;
 	    }
 	    pmDiscoverInvokeInDomCallBacks(p, hdr.type, &stamp, &inresult);
-#if defined(HAVE_32BIT_PTR)
-	    ;
-#else
+	    /* Note:
+	     *   inresult.namelist is always malloc'd in
+	     *   pmDiscoverDecodeMetaInDom(), either indirectly via
+	     *   __pmLogLoadInDom() (for non-32-bit pointer systems) or
+	     *   directly (for 32-bit-pointer systems).
+	     */
 	    free(inresult.namelist);
-#endif
 	    break;
 
 	case TYPE_LABEL:

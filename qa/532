@@ -26,6 +26,9 @@ _filter()
     | sed \
 	-e '/^Roll .*\/NOTICES/d' \
 	-e '/^Start .*\/NOTICES/d' \
+	-e '/^Add merge callback for: pmlogger_daily_report/d' \
+	-e '/^Merge callbacks .../d' \
+	-e '/^callback: .*pmlogger_daily_report/d' \
 	-e "s;$tmp;TMP;g" \
 	-e "s/local:/HOST/g" \
 	-e "s/`hostname`/HOST/g" \
@@ -123,7 +126,7 @@ echo "s/`pmdate %Y%m%d`/TODAY/g" >>$tmp/sed
 echo "s/$yesterday/YESTERDAY/g" >>$tmp/sed
 
 echo >$tmp/control '$version=1.1
-LOCALHOSTNAME	n   n	'"$tmp"'	./config'
+LOCALHOSTNAME	n   n	'"$tmp"'	-c ./config'
 
 # pmlogger_daily runs as the user "pcp" ... fix ownership
 #

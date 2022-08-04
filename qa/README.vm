@@ -88,7 +88,7 @@ Fedora
     # package search recipe (name and info or description)
     $ dnf search <pattern>
     # which package installs a file/directory
-    $ rpm -qF <path>
+    $ rpm -qf <path>
     # which files are in an installed package
     $ rpm -ql <package>
     # update all packages recipe
@@ -159,6 +159,10 @@ CentOS
       but it does not work ... CentOS 8 needs to be a reinstall
       then
     # sudo dnf install epel-release -y
+
+    # special notes for CentOS Stream 9
+    # - need CRB repo enabled (it is not enabled by default)
+    $ sudo dnf config-manager --set-enabled crb
 
 openSUSE
     https://en.opensuse.org/Lifetime

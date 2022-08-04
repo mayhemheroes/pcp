@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019,2021 Red Hat.
+ * Copyright (c) 2018-2019,2021-2022 Red Hat.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published
@@ -317,17 +317,21 @@ on_write_callback(uv_callback_t *handle, void *data)
     struct client		*client = (struct client *)request->writer.data;
     int				sts;
 
+    (void)handle;
     if (pmDebugOptions.af)
 	fprintf(stderr, "%s: client=%p\n", "on_write_callback", client);
 
     if (client->stream.secure == 0) {
 	sts = uv_write(&request->writer, (uv_stream_t *)&client->stream,
 		 &request->buffer[0], request->nbuffers, request->callback);
-	if (sts != 0)
-	    fprintf(stderr, "%s: ERROR uv_write failed\n", "on_write_callback");
+	if (sts != 0) {
+	    pmNotifyErr(LOG_ERR, "%s: %s - uv_write failed [%s]: %s\n",
+			pmGetProgname(), "on_write_callback",
+			uv_err_name(sts), uv_strerror(sts));
+	    client_close(client);
+	}
     } else
 	secure_client_write(client, request);
-    (void)handle;
     return 0;
 }
 
@@ -462,14 +466,16 @@ on_client_connection(uv_stream_t *stream, int status)
     uv_handle_t		*handle;
 
     if (status != 0) {
-	fprintf(stderr, "%s: client connection failed: %s\n",
-			pmGetProgname(), uv_strerror(status));
+	pmNotifyErr(LOG_ERR, "%s: %s - %s failed [%s]: %s\n",
+		    pmGetProgname(), "on_client_connection", "connection",
+		    uv_err_name(status), uv_strerror(status));
 	return;
     }
 
     if ((client = calloc(1, sizeof(*client))) == NULL) {
-	fprintf(stderr, "%s: out-of-memory for new client\n",
-			pmGetProgname());
+	pmNotifyErr(LOG_ERR, "%s: %s - %s failed [%s]: %s\n",
+			pmGetProgname(), "on_client_connection", "calloc",
+			"ENOMEM", strerror(ENOMEM));
 	return;
     }
     if (pmDebugOptions.context | pmDebugOptions.af)
@@ -483,16 +489,18 @@ on_client_connection(uv_stream_t *stream, int status)
 
     status = uv_tcp_init(proxy->events, &client->stream.u.tcp);
     if (status != 0) {
-	fprintf(stderr, "%s: client tcp init failed: %s\n",
-			pmGetProgname(), uv_strerror(status));
+	pmNotifyErr(LOG_ERR, "%s: %s - %s failed [%s]: %s\n",
+		    pmGetProgname(), "on_client_connection", "uv_tcp_init",
+		    uv_err_name(status), uv_strerror(status));
 	client_put(client);
 	return;
     }
 
     status = uv_accept(stream, (uv_stream_t *)&client->stream.u.tcp);
     if (status != 0) {
-	fprintf(stderr, "%s: client tcp init failed: %s\n",
-			pmGetProgname(), uv_strerror(status));
+	pmNotifyErr(LOG_ERR, "%s: %s - %s failed [%s]: %s\n",
+		    pmGetProgname(), "on_client_connection", "uv_accept",
+		    uv_err_name(status), uv_strerror(status));
 	client_put(client);
 	return;
     }
@@ -503,8 +511,9 @@ on_client_connection(uv_stream_t *stream, int status)
     status = uv_read_start((uv_stream_t *)&client->stream.u.tcp,
 			    on_buffer_alloc, on_client_read);
     if (status != 0) {
-	fprintf(stderr, "%s: client read start failed: %s\n",
-			pmGetProgname(), uv_strerror(status));
+	pmNotifyErr(LOG_ERR, "%s: %s - %s failed [%s]: %s\n",
+		    pmGetProgname(), "on_client_connection", "uv_read_start",
+		    uv_err_name(status), uv_strerror(status));
 	client_close(client);
     }
 }
@@ -537,8 +546,9 @@ open_request_port(struct proxy *proxy, struct server *server,
 
     sts = uv_listen((uv_stream_t *)&stream->u.tcp, maxpending, on_client_connection);
     if (sts != 0) {
-	fprintf(stderr, "%s: socket listen error %s\n",
-			pmGetProgname(), uv_strerror(sts));
+	pmNotifyErr(LOG_ERR, "%s: %s - uv_listen failed [%s]: %s\n",
+			pmGetProgname(), "open_request_port",
+			uv_err_name(sts), uv_strerror(sts));
 	uv_close(handle, NULL);
 	return -ENOTCONN;
     }
@@ -563,8 +573,9 @@ open_request_local(struct proxy *proxy, struct server *server,
     handle->data = (void *)proxy;
     sts = uv_pipe_bind(&stream->u.local, name);
     if (sts != 0) {
-	fprintf(stderr, "%s: local bind (%s) error %s\n",
-			pmGetProgname(), name, uv_strerror(sts));
+	pmNotifyErr(LOG_ERR, "%s: %s - uv_pipe_bind %s failed [%s]: %s\n",
+			pmGetProgname(), "open_request_local", name,
+			uv_err_name(sts), uv_strerror(sts));
 	uv_close(handle, NULL);
         return -ENOTCONN;
     }
@@ -574,8 +585,9 @@ open_request_local(struct proxy *proxy, struct server *server,
 
     sts = uv_listen((uv_stream_t *)&stream->u.local, maxpending, on_client_connection);
     if (sts != 0) {
-	fprintf(stderr, "%s: local listen error %s\n",
-			pmGetProgname(), uv_strerror(sts));
+	pmNotifyErr(LOG_ERR, "%s: %s - %s failed [%s]: %s\n",
+		    pmGetProgname(), "open_request_local", "uv_listen",
+		    uv_err_name(sts), uv_strerror(sts));
 	uv_close(handle, NULL);
         return -ENOTCONN;
     }
@@ -709,6 +721,34 @@ fail:
 }
 
 static void
+dump_request_ports(FILE *output, void *arg)
+{
+    struct proxy	*proxy = (struct proxy *)arg;
+    struct stream	*stream;
+    uv_os_fd_t		uv_fd;
+    unsigned int	i;
+    int			fd;
+
+    fprintf(output, "%s request port(s):\n"
+		"  sts fd   port  family address\n"
+		"  === ==== ===== ====== =======\n", pmGetProgname());
+
+    for (i = 0; i < proxy->nservers; i++) {
+	stream = &proxy->servers[i].stream;
+	fd = (uv_fileno((uv_handle_t *)stream, &uv_fd) < 0) ? -1 : (int)uv_fd;
+	if (stream->family == STREAM_LOCAL)
+	    fprintf(output, "  %-3s %4d %5s %-6s %s\n",
+		    stream->active ? "ok" : "err", fd, "",
+		    "unix", stream->address);
+	else
+	    fprintf(output, "  %-3s %4d %5d %-6s %s\n",
+		    stream->active ? "ok" : "err", fd, stream->port,
+		    stream->family == STREAM_TCP4 ? "inet" : "ipv6",
+		    stream->address ? stream->address : "INADDR_ANY");
+    }
+}
+
+static void
 close_proxy(struct proxy *proxy)
 {
     close_pcp_module(proxy);
@@ -755,31 +795,13 @@ shutdown_ports(void *arg)
 }
 
 static void
-dump_request_ports(FILE *output, void *arg)
+shutdown_proxy(uv_timer_t *arg)
 {
-    struct proxy	*proxy = (struct proxy *)arg;
-    struct stream	*stream;
-    uv_os_fd_t		uv_fd;
-    unsigned int	i;
-    int			fd;
+    uv_handle_t		*handle = (uv_handle_t *)arg;
+    struct proxy	*proxy = (struct proxy *)handle->data;
 
-    fprintf(output, "%s request port(s):\n"
-		"  sts fd   port  family address\n"
-		"  === ==== ===== ====== =======\n", pmGetProgname());
-
-    for (i = 0; i < proxy->nservers; i++) {
-	stream = &proxy->servers[i].stream;
-	fd = (uv_fileno((uv_handle_t *)stream, &uv_fd) < 0) ? -1 : (int)uv_fd;
-	if (stream->family == STREAM_LOCAL)
-	    fprintf(output, "  %-3s %4d %5s %-6s %s\n",
-		    stream->active ? "ok" : "err", fd, "",
-		    "unix", stream->address);
-	else
-	    fprintf(output, "  %-3s %4d %5d %-6s %s\n",
-		    stream->active ? "ok" : "err", fd, stream->port,
-		    stream->family == STREAM_TCP4 ? "inet" : "ipv6",
-		    stream->address ? stream->address : "INADDR_ANY");
-    }
+    shutdown_ports(proxy);
+    exit(0);
 }
 
 /*
@@ -819,13 +841,23 @@ check_proxy(uv_check_t *arg)
 }
 
 static void
-main_loop(void *arg)
+main_loop(void *arg, struct timeval *runtime)
 {
     struct proxy	*proxy = (struct proxy *)arg;
+    uv_timer_t		shutdown_io;
     uv_timer_t		initial_io;
     uv_prepare_t	before_io;
     uv_check_t		after_io;
     uv_handle_t		*handle;
+
+    if (runtime) {
+	uint64_t millisec = runtime->tv_sec * 1000;
+	millisec += runtime->tv_usec / 1000;
+	uv_timer_init(proxy->events, &shutdown_io);
+	handle = (uv_handle_t *)&shutdown_io;
+	handle->data = (void *)proxy;
+	uv_timer_start(&shutdown_io, shutdown_proxy, millisec, 0);
+    }
 
     uv_timer_init(proxy->events, &initial_io);
     handle = (uv_handle_t *)&initial_io;

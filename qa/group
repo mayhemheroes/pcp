@@ -1879,6 +1879,10 @@ x11
 1423 pcp2spark python pcp2xxx local
 1424 logutil pmlogctl local
 1425 logutil local
+1426 libpcp local
+1427 pmlogmv local
+1428 logutil pmrep python local
+1429 logutil pmlogextract pmdumplog pmlogrewrite local
 1433 pmproxy local pmconfig
 1434 pmda.nfsclient local
 1435 pmda.elasticsearch local
@@ -1909,6 +1913,7 @@ x11
 1549 pmrep python local
 1566 logutil libpcp local
 1573 pmproxy libpcp_web pmlogger local
+1574 pmseries local
 1584 pmda.mongodb local
 1588 python iostat local
 1591 archive archive_v3 local
@@ -1932,6 +1937,7 @@ x11
 1653 pmda.denki local
 1660 libpcp labels local
 1661 pmproxy libpcp_web pmlogger local pmlc
+1662 pmproxy libpcp_web pmlogger valgrind local
 1671 multi-archive archive libpcp pmrep local python
 1672 secure pmcd local
 1680 openvswitch local
@@ -1940,6 +1946,7 @@ x11
 1688 pmieconf local
 1689 pmproxy libpcp_web local
 1690 pmseries local
+1691 pmseries local
 1692 pmda.pmcd local
 1694 pidstat local python pcp pmlogextract
 1695 pmproxy valgrind local
@@ -2023,6 +2030,8 @@ x11
 1902 help local
 1914 atop local
 1927 pmda.sockets local
+1931 pmda.bpf local
+1936 other local pmclient
 1937 pmlogrewrite pmda.xfs local pmdumplog
 1955 libpcp pmda pmda.pmcd local
 1956 pmda.linux pmcd local

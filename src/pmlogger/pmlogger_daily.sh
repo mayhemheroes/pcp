@@ -162,6 +162,65 @@ _timespec()
     done
 }
 
+# replacement for fmt(1) that is the same on every platform ... mimics
+# the FSF version with a maximum line length of 75 columns
+#
+_fmt()
+{
+    $PCP_AWK_PROG '
+BEGIN		{ len = 0 }
+		{ for (i = 1; i <= NF; i++) {
+		    wlen = length($i)
+		    if (len + 1 + wlen > 75) {
+			printf "\n"
+			len = 0
+		    }
+		    if (len + 1 + wlen <= 75) {
+			if (len == 0) {
+			    printf "%s",$i
+			    len = wlen;
+			}
+			else {
+			    printf " %s",$i
+			    len += 1 + wlen
+			}
+		    }
+		  }
+		}
+END		{ if (len > 0) printf "\n" }'
+}
+
+# check callback
+# shell command is $1 possibly surrounded by quotes, so unpick
+# "executable program" (first word) and if it exists and is executable
+# append shell command to $2
+#
+_add_callback()
+{
+    case "$1"
+    in
+	\"*\")
+		_shell="`echo "$1" | sed -e 's/^"//' -e 's/"$//'`"
+		;;
+	\'*\')
+		_shell="`echo "$1" | sed -e "s/^'//" -e "s/'$//"`"
+		;;
+	*)
+		_shell="$1"
+		;;
+    esac
+    _prog=`echo "$_shell" | sed -e 's/ .*//'`
+
+    if which "$_prog" >/dev/null 2>&1
+    then
+	echo "$_shell" >>"$2"
+	return 0
+    else
+	_warning "$_prog: not a executable on PATH=$PATH"
+	return 1
+    fi
+}
+
 if is_chkconfig_on pmlogger
 then
     PMLOGGER_CTL=on
@@ -258,6 +317,7 @@ echo > $tmp/usage
 cat >> $tmp/usage <<EOF
 Options:
   -c=FILE,--control=FILE  pmlogger control file
+  -D,--noreport           do not run pmlogger_daily_report
   -E,--expunge            expunge metrics with metadata inconsistencies when merging archives
   -f,--force              force actions (intended for QA, not production)
   -k=TIME,--discard=TIME  remove archives after TIME (format DD[:HH[:MM]])
@@ -305,6 +365,7 @@ MFLAG=false
 EXPUNGE=""
 FORCE=false
 KILL=pmsignal
+DO_DAILY_REPORT=true
 
 ARGS=`pmgetopt --progname=$prog --config=$tmp/usage -- "$@"`
 [ $? != 0 ] && exit 1
@@ -317,6 +378,8 @@ do
 	-c)	CONTROL="$2"
 		CONTROLDIR="$2.d"
 		shift
+		;;
+	-D)	DO_DAILY_REPORT=false
 		;;
 	-E)	EXPUNGE="-E"
 		;;
@@ -467,6 +530,101 @@ done
 
 [ $# -ne 0 ] && _usage
 
+if $SHOWME
+then
+    :
+else
+    # Salt away previous log, if any ...
+    #
+    _save_prev_file "$PROGLOG"
+    # After argument checking, everything must be logged to ensure no mail is
+    # accidentally sent from cron.  Close stdout and stderr, then open stdout
+    # as our logfile and redirect stderr there too.  Create the log file with
+    # correct ownership first.
+    #
+    # Exception ($SHOWME, above) is for -N where we want to see the output.
+    #
+    touch "$MYPROGLOG"
+    chown $PCP_USER:$PCP_GROUP "$MYPROGLOG" >/dev/null 2>&1
+    exec 1>"$MYPROGLOG" 2>&1
+fi
+
+if $COMPRESSONLY
+then
+    # no merge callbacks or autosave with -K
+    :
+else
+    # merge callback initialization ...
+    # pmlogger_daily_report goes first, then
+    # values (script names) set in the environment, then
+    # (later) any values (script names) set in the control files
+    #
+    touch $tmp/merge_callback
+    if $DO_DAILY_REPORT && [ -x "$PCP_BINADM_DIR/pmlogger_daily_report" ]
+    then
+	# pmlogger_daily_report script is present, need to see if it
+	# is enabled ... in systemd-land that's easy, otherwise we
+	# defer to the existence of the $PCP_SA_DIR directory
+	#
+	rm -f $tmp/want_daily_report
+	if which systemctl >/dev/null 2>&1
+	then
+	    # if pmlogger_daily_report.timer is enabled, assume we're good
+	    # to go ...
+	    #
+	    if [ "`systemctl is-enabled pmlogger_daily_report.timer 2>/dev/null`" = enabled ]
+	    then
+		touch $tmp/want_daily_report
+	    fi
+	else
+	    if [ -d "$PCP_SA_DIR" ]
+	    then
+		touch $tmp/want_daily_report
+	    fi
+	fi
+	if [ -f $tmp/want_daily_report ]
+	then
+	    # Note: actual achive name will follow -a when callback
+	    # happens
+	    #
+	    if _add_callback "$PCP_BINADM_DIR/pmlogger_daily_report -o $PCP_SA_DIR -a" $tmp/merge_callback
+	    then
+		$VERBOSE && echo "Add merge callback for: pmlogger_daily_report"
+	    fi
+	fi
+    fi
+    if [ -n "$PCP_MERGE_CALLBACK" ]
+    then
+	if _add_callback "$PCP_MERGE_CALLBACK" $tmp/merge_callback
+	then
+	    $VERBOSE && echo "Add merge callback from environment: $PCP_MERGE_CALLBACK"
+	fi
+    fi
+
+    # autosave initialization ...
+    #
+    touch $tmp/autosave
+    touch $tmp/savefiles
+    if [ -n "$PCP_AUTOSAVE_DIR" ]
+    then
+	echo "$PCP_AUTOSAVE_DIR" >$tmp/autosave
+	$VERBOSE && echo "Using \$PCP_AUTOSAVE_DIR from environment: $PCP_AUTOSAVE_DIR"
+    fi
+fi
+
+# compress callback initialization ...
+# values (script names) set in the environment first, then
+# (later) any values (script names) set in the control files
+#
+touch $tmp/compress_callback
+if [ -n "$PCP_COMPRESS_CALLBACK" ]
+then
+    if _add_callback "$PCP_COMPRESS_CALLBACK" $tmp/compress_callback
+    then
+	$VERBOSE && echo "Add compress callback from environment: $PCP_COMPRESS_CALLBACK"
+    fi
+fi
+
 if $PFLAG
 then
     rm -f $tmp/ok
@@ -534,25 +692,6 @@ else
     else
 	echo "Warning: cannot install new date-and-timestamp"
     fi
-fi
-
-if $SHOWME
-then
-    :
-else
-    # Salt away previous log, if any ...
-    #
-    _save_prev_file "$PROGLOG"
-    # After argument checking, everything must be logged to ensure no mail is
-    # accidentally sent from cron.  Close stdout and stderr, then open stdout
-    # as our logfile and redirect stderr there too.  Create the log file with
-    # correct ownership first.
-    #
-    # Exception ($SHOWME, above) is for -N where we want to see the output.
-    #
-    touch "$MYPROGLOG"
-    chown $PCP_USER:$PCP_GROUP "$MYPROGLOG" >/dev/null 2>&1
-    exec 1>"$MYPROGLOG" 2>&1
 fi
 
 if $VERY_VERBOSE
@@ -1036,6 +1175,41 @@ s/^\([A-Za-z][A-Za-z0-9_]*\)=/export \1; \1=/p
 			    fi
 			    ;;
 
+			'export PCP_MERGE_CALLBACK;'*)
+			    if ! $COMPRESSONLY
+			    then
+				$SHOWME && echo "+ $cmd"
+				script="`echo "$cmd" | sed -e 's/.*BACK; PCP_MERGE_CALLBACK=//'`"
+				if _add_callback "$script" $tmp/merge_callback
+				then
+				    $VERBOSE && echo "Add merge callback: $script"
+				fi
+			    fi
+			    ;;
+
+			'export PCP_COMPRESS_CALLBACK;'*)
+			    $SHOWME && echo "+ $cmd"
+			    script="`echo "$cmd" | sed -e 's/.*BACK; PCP_COMPRESS_CALLBACK=//'`"
+			    if _add_callback "$script" $tmp/compress_callback
+			    then
+				$VERBOSE && echo "Add compress callback: $script"
+			    fi
+			    ;;
+
+			'export PCP_AUTOSAVE_DIR;'*)
+			    if ! $COMPRESSONLY
+			    then
+				$SHOWME && echo "+ $cmd"
+				eval $cmd
+				if [ -s $tmp/autosave ]
+				then
+				    _warning "\$PCP_AUTOSAVE_DIR ($PCP_AUTOSAVE_DIR) reset from control file, previous value (`cat $tmp/autosave`) ignored"
+				fi
+				echo "$PCP_AUTOSAVE_DIR" >$tmp/autosave
+				$VERBOSE && echo "Using \$PCP_AUTOSAVE_DIR: $PCP_AUTOSAVE_DIR"
+			    fi
+			    ;;
+
 			*)
 			    $SHOWME && echo "+ $cmd"
 			    echo eval $cmd >>$tmp/cmd
@@ -1349,7 +1523,7 @@ s/^\([A-Za-z][A-Za-z0-9_]*\)=/export \1; \1=/p
 		    if $VERBOSE
 		    then
 			echo "Archive files older than `_timespec $CULLAFTER` being removed ..."
-			fmt <$tmp/list | sed -e 's/^/    /'
+			_fmt <$tmp/list | sed -e 's/^/    /'
 		    fi
 		    if $SHOWME
 		    then
@@ -1482,6 +1656,7 @@ END	{ if (inlist != "") print lastdate,inlist }' >$tmp/list
 				done
 			    fi
 			    narch=`echo $inlist | wc -w | sed -e 's/ //g'`
+			    rm -f $tmp/mergefile
 			    if [ "$narch" = 1 ]
 			    then
 				# optimization - rename, don't merge, for one input archive
@@ -1489,6 +1664,7 @@ END	{ if (inlist != "") print lastdate,inlist }' >$tmp/list
 				if $SHOWME
 				then
 				    echo "+ pmlogmv$MYARGS $inlist $outfile"
+				    echo "$outfile" >$tmp/mergefile
 				elif pmlogmv$MYARGS $inlist $outfile
 				then
 				    if $VERY_VERBOSE
@@ -1496,6 +1672,7 @@ END	{ if (inlist != "") print lastdate,inlist }' >$tmp/list
 					echo >&2 "Renamed output archive $outfile ..."
 					pmdumplog >&2 -L $outfile
 				    fi
+				    echo "$outfile" >$tmp/mergefile
 				else
 				    _error "problems executing pmlogmv for host \"$host\""
 				fi
@@ -1505,6 +1682,7 @@ END	{ if (inlist != "") print lastdate,inlist }' >$tmp/list
 				if $SHOWME
 				then
 				    echo "+ pmlogger_merge$MYARGS $EXPUNGE -f $inlist $outfile"
+				    echo "$outfile" >$tmp/mergefile
 				elif pmlogger_merge$MYARGS $EXPUNGE -f $inlist $outfile
 				then
 				    if $VERY_VERBOSE
@@ -1512,9 +1690,50 @@ END	{ if (inlist != "") print lastdate,inlist }' >$tmp/list
 					echo >&2 "Merged output archive $outfile ..."
 					pmdumplog >&2 -L $outfile
 				    fi
+				    echo "$outfile" >$tmp/mergefile
 				else
 				    _error "problems executing pmlogger_merge for host \"$host\""
 				fi
+			    fi
+			    if [ -s $tmp/mergefile -a -s $tmp/merge_callback ]
+			    then
+				# Do merge callbacks
+				#
+				$VERBOSE && echo "Merge callbacks ..."
+				mergefile="$dir/`cat $tmp/mergefile`"
+				cat $tmp/merge_callback \
+				| while read exec
+				do
+				    case "$exec"
+				    in
+					$PCP_BINADM_DIR/pmlogger_daily_report)
+					    # only do this one for the primary
+					    # pmlogger instance
+					    #
+					    [ "$primary" != y ] && continue
+					    ;;
+				    esac
+				    if $SHOWME
+				    then
+					echo "+ $exec $mergefile"
+				    else
+					$VERBOSE && echo "callback: $exec $mergefile"
+					eval $exec $mergefile
+					sts=$?
+					if [ "$sts" = 0 ]
+					then
+					    :
+					else
+					    _warning "$exec $mergefile returned status $sts"
+					fi
+				    fi
+				done
+			    fi
+			    if [ -s $tmp/mergefile -a -s $tmp/autosave ]
+			    then
+				# save archive basename for possible AUTOSAVE use later
+				#
+				cat $tmp/mergefile >>$tmp/savefiles
 			    fi
 			fi
 		    done
@@ -1668,13 +1887,51 @@ p
 			    else
 				echo "Archive files older than $COMPRESSAFTER days being compressed ..."
 			    fi
-			    fmt <$tmp/list | sed -e 's/^/    /'
+			    _fmt <$tmp/list | sed -e 's/^/    /'
 			fi
 			if $SHOWME
 			then
 			    cat $tmp/list | xargs echo + $COMPRESS
 			else
 			    cat $tmp/list | xargs $COMPRESS
+			fi
+			if [ -s $tmp/compress_callback ]
+			then
+			    # Do compress callbacks, but only for full
+			    # day's archives
+			    #
+			    $VERBOSE && echo "Compress callbacks ..."
+			    cat $tmp/list \
+			    | sed -n \
+				-e 's/\.[0-9][0-9]*$//' \
+				-e 's/\.meta$//' \
+				-e 's/\.index$//' \
+				-e '/^[12][0-9][0-9][0-9][0-1][0-9][0-3][0-9]$/p' \
+				-e '/^[0-9][0-9][0-1][0-9][0-3][0-9]$/p' \
+			    | sort -n \
+			    | uniq \
+			    | while read compressfile
+			    do
+				compressfile="$dir/$compressfile"
+				cat $tmp/compress_callback \
+				| while read exec
+				do
+				    if $SHOWME
+				    then
+					echo "+ $exec $compressfile"
+				    else
+					$VERBOSE && echo "callback: $exec $compressfile"
+					eval $exec $compressfile
+					sts=$?
+					if [ "$sts" = 0 ]
+					then
+					    :
+					else
+					    _warning "$exec $compressfile returned status $sts"
+					fi
+				    fi
+				done
+			    done
 			fi
 		    else
 			$VERY_VERBOSE && echo >&2 "Warning: no archive files found to compress"
@@ -1689,6 +1946,50 @@ p
 	    else
 		_error "$COMPRESS_PROG: compression program not found"
 	    fi
+	fi
+
+	# autosave any newly merged (and possibly compressed) archives
+	# if PCP_AUTOSAVE_DIR is in play
+	#
+	if [ -s $tmp/autosave -a -s $tmp/savefiles ]
+	then
+	    if $VERBOSE
+	    then
+		( echo "Autosave ... "; _fmt <$tmp/savefiles ) \
+		| sed -e 's/^/    /'
+	    fi
+	    last_mkdir=''
+	    cat $tmp/savefiles \
+	    | while read savefile
+	    do
+		# make sure destination directory hierarchy exists and $PCP_USER
+		# user can write there
+		#
+		DATEYYYY=`echo "$savefile" | sed -e 's/^\(....\).*/\1/'`
+		DATEMM=`echo "$savefile" | sed -e 's/^....\(..\).*/\1/'`
+		DATEDD=`echo "$savefile" | sed -e 's/^......\(..\)/\1/'`
+		auto_dir="`cat $tmp/autosave \
+			   | sed \
+			       -e s/DATEYYYY/$DATEYYYY/g \
+			       -e s/DATEMM/$DATEMM/g \
+			       -e s/DATEDD/$DATEDD/g \
+			       -e s/LOCALHOSTNAME/$dirhostname/`"
+		if [ ! -d "$auto_dir" -a "$auto_dir" != "$last_mkdir" ]
+		then
+		    mkdir_and_chown "$auto_dir" 755 $PCP_USER:$PCP_GROUP >$tmp/tmp 2>&1
+		    if [ ! -d "$auto_dir" ]
+		    then
+			cat $tmp/tmp
+			_error "cannot create directory ($auto_dir) for autosave"
+		    else
+			_warning "creating directory ($auto_dir) for autosave"
+			# fall through and another warning will come from
+			# _autosave()
+		    fi
+		    last_mkdir="$auto_dir"
+		fi
+		_autosave "$dir" "$savefile" "$auto_dir"
+	    done
 	fi
 
 	# and cull old trace files (from -t option)
@@ -1711,7 +2012,7 @@ p
 		if $VERBOSE
 		then
 		    echo "Trace files older than $TRACE days being removed ..."
-		    fmt <$tmp/list | sed -e 's/^/    /'
+		    _fmt <$tmp/list | sed -e 's/^/    /'
 		fi
 		if $SHOWME
 		then
@@ -1726,6 +2027,28 @@ p
 
 	_unlock "$dir"
     done
+}
+
+# Paranoid archive saving
+#
+# Usage: _autosave src_dir archive_base dest_dir
+#
+_autosave()
+{
+    _src="$1"
+    _base="$2"
+    _dest="$3"
+    if [ ! -d "$_dest" ]
+    then
+	_warning "$_base: AUTOSAVE skipped: directory $_dest does not exist"
+	return
+    fi
+    if pmlogmv -c "$_src/$_base" "$_dest/$_base"
+    then
+	:
+    else
+	_warning "$_base: AUTOSAVE failed"
+    fi
 }
 
 

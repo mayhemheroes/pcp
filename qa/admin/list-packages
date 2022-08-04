@@ -100,6 +100,10 @@ End-of-File
 	    done
 	done
 
+	# if at least one package from the manifest line is in
+	# the list and available, then we're done
+	#
+	rm -f $tmp.ok
 	for pkg in $pkgs
 	do
 	    [ "$pkg" = "N/A" ] && continue
@@ -115,8 +119,20 @@ END						{ exit sts }'
 		if [ -z "$avail" ]
 		then
 		    echo "manifest:$lineno $pkg: in packing list, but not available?"
+		else
+		    touch $tmp.ok
+		    break
 		fi
-	    else
+	    fi
+	done
+	if [ ! -f $tmp.ok ]
+	then
+	    # no match from the list, so reprocess the packages in the
+	    # manifest line looking for available packages as candidates
+	    # to be added to the list
+	    #
+	    for pkg in $pkgs
+	    do
 		# not in list, unless it is to be skipped, or we have
 		# a required package for this manifest line, is it available?
 		#
@@ -150,8 +166,8 @@ END							{ exit sts }'
 			fi
 		    fi
 		fi
-	    fi
-	done
+	    done
+	fi
     done
 
     # are the required ones all there?
@@ -583,8 +599,15 @@ then
 	# strip all packages in both $tmp.list and $tmp.installed and
 	# leave the result in $tmp.list
 	#
-	sort <$tmp.list >$tmp.1
-	sort <$tmp.installed >$tmp.2
+	sort <$tmp.list | uniq >$tmp.1
+	sort <$tmp.installed | uniq >$tmp.2
+	if $very_verbose
+	then
+	    echo >&2 "Required:"
+	    cat $tmp.1 >&2
+	    echo >&2 "Installed:"
+	    cat $tmp.2 >&2
+	fi
 	comm -23 $tmp.1 $tmp.2 >$tmp.list
     fi
 fi
