@@ -1,0 +1,6 @@
+project: pcp
+target: pmnumberstr
+
+cmds:
+  - cmd: /fuzz_pmNumberStr
+    libfuzzer: true

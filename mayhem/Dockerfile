@@ -3,14 +3,14 @@ FROM registry.fedoraproject.org/fedora:34
 COPY . /usr/src/pcp
 
 WORKDIR /usr/src/pcp
-RUN dnf install -y git rpm-build 'dnf-command(builddep)' && \
+RUN dnf install -y clang git rpm-build 'dnf-command(builddep)' && \
     # pmdabind2
     dnf install -y perl-XML-LibXML perl-File-Slurp && \
     dnf builddep -y build/rpm/redhat.spec && \
     mkdir -p /root/rpmbuild/SOURCES && \
     ./Makepkgs --source && \
     mv build/tar/pcp-*.src.tar.gz /root/rpmbuild/SOURCES && \
-    rpmbuild -bb build/rpm/redhat.spec
+    rpmbuild -bb build/rpm/redhat.spec | tee /out1
 
 WORKDIR /root/rpmbuild/RPMS/x86_64
 RUN mkdir /build && \
@@ -29,9 +29,12 @@ RUN mkdir /build && \
       python3-pcp-$release.x86_64.rpm \
       /build
 
+RUN clang++ /usr/src/pcp/mayhem/fuzz_pmNumberStr.cpp -fsanitize=fuzzer,address -std=c++17 /root/rpmbuild/BUILD/pcp-6.0.0/src/libpcp/src/libpcp.a -llzma  -lssl3 -lnss3 -lnspr4 -lsasl2 -llzma -lavahi-common -lavahi-client -llzma -lsystemd  -lm -lpthread   -ldl  -o /fuzz
+
 # actual container
 FROM registry.fedoraproject.org/fedora:34
 COPY --from=0 /build/ /build/
+COPY --from=0 /fuzz /fuzz_pmNumberStr
 
 ENV SUMMARY="Performance Co-Pilot" \
     DESCRIPTION="Performance Co-Pilot is a system performance analysis toolkit." \
