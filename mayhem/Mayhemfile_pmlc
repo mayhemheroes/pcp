@@ -1,0 +1,5 @@
+project: pcp
+target: pmlc
+
+cmds:
+  - cmd: /usr/bin/pmlc
