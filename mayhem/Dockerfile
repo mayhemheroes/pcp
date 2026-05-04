@@ -8,7 +8,7 @@ RUN dnf install -y clang git rpm-build 'dnf-command(builddep)' && \
     dnf install -y perl-XML-LibXML perl-File-Slurp && \
     dnf builddep -y build/rpm/redhat.spec && \
     mkdir -p /root/rpmbuild/SOURCES && \
-    git init -b master && git config user.email fuzz@mayhem.security && git config user.name Mayhem && git add -A && git commit -m init && \
+    git config user.email fuzz@mayhem.security && git config user.name Mayhem && (git add -A && git commit -m init || true) && \
     ./Makepkgs --source && \
     mv build/tar/pcp-*.src.tar.gz /root/rpmbuild/SOURCES && \
     rpmbuild -bb build/rpm/redhat.spec | tee /out1
