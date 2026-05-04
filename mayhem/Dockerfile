@@ -9,9 +9,8 @@ RUN dnf install -y clang git rpm-build make gzip 'dnf-command(builddep)' && \
     dnf builddep -y build/rpm/redhat.spec && \
     mkdir -p /root/rpmbuild/SOURCES && \
     version=$(grep "^PACKAGE_MAJOR" VERSION.pcp | cut -d= -f2).$(grep "^PACKAGE_MINOR" VERSION.pcp | cut -d= -f2).$(grep "^PACKAGE_REVISION" VERSION.pcp | cut -d= -f2) && \
-    mkdir -p build/tar && \
-    tar czf build/tar/pcp-$version.src.tar.gz --transform "s|^\.|pcp-$version|" . && \
-    mv build/tar/pcp-*.src.tar.gz /root/rpmbuild/SOURCES && \
+    tar czf /tmp/pcp-$version.src.tar.gz --transform "s|^\.|pcp-$version|" --warning=no-file-changed . ; true && \
+    mv /tmp/pcp-$version.src.tar.gz /root/rpmbuild/SOURCES/ && \
     rpmbuild -bb build/rpm/redhat.spec | tee /out1
 
 WORKDIR /root/rpmbuild/RPMS/x86_64
