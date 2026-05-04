@@ -1,5 +1,5 @@
 # rpm build container
-FROM registry.fedoraproject.org/fedora:34
+FROM registry.fedoraproject.org/fedora:38
 COPY . /usr/src/pcp
 
 WORKDIR /usr/src/pcp
@@ -8,8 +8,9 @@ RUN dnf install -y clang git rpm-build make gzip 'dnf-command(builddep)' && \
     dnf install -y perl-XML-LibXML perl-File-Slurp && \
     dnf builddep -y build/rpm/redhat.spec && \
     mkdir -p /root/rpmbuild/SOURCES && \
-    git config user.email fuzz@mayhem.security && git config user.name Mayhem && (git add -A && git commit -m init || true) && \
-    ./Makepkgs --source && \
+    version=$(grep "^PACKAGE_MAJOR" VERSION.pcp | cut -d= -f2).$(grep "^PACKAGE_MINOR" VERSION.pcp | cut -d= -f2).$(grep "^PACKAGE_REVISION" VERSION.pcp | cut -d= -f2) && \
+    mkdir -p build/tar && \
+    tar czf build/tar/pcp-$version.src.tar.gz --transform "s|^\.|pcp-$version|" . && \
     mv build/tar/pcp-*.src.tar.gz /root/rpmbuild/SOURCES && \
     rpmbuild -bb build/rpm/redhat.spec | tee /out1
 
@@ -30,10 +31,10 @@ RUN mkdir /build && \
       python3-pcp-$release.x86_64.rpm \
       /build
 
-RUN clang++ /usr/src/pcp/mayhem/fuzz_pmNumberStr.cpp -fsanitize=fuzzer,address -std=c++17 /root/rpmbuild/BUILD/pcp-6.0.0/src/libpcp/src/libpcp.a -llzma  -lssl3 -lnss3 -lnspr4 -lsasl2 -llzma -lavahi-common -lavahi-client -llzma -lsystemd  -lm -lpthread   -ldl  -o /fuzz
+RUN clang++ /usr/src/pcp/mayhem/fuzz_pmNumberStr.cpp -fsanitize=fuzzer,address -std=c++17 $(ls /root/rpmbuild/BUILD/pcp-*/src/libpcp/src/libpcp.a | head -1) -llzma  -lssl3 -lnss3 -lnspr4 -lsasl2 -llzma -lavahi-common -lavahi-client -llzma -lsystemd  -lm -lpthread   -ldl  -o /fuzz
 
 # actual container
-FROM registry.fedoraproject.org/fedora:34
+FROM registry.fedoraproject.org/fedora:38
 COPY --from=0 /build/ /build/
 COPY --from=0 /fuzz /fuzz_pmNumberStr
 
