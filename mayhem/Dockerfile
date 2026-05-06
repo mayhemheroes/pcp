@@ -3,7 +3,7 @@ FROM registry.fedoraproject.org/fedora:38
 COPY . /usr/src/pcp
 
 WORKDIR /usr/src/pcp
-RUN dnf install -y clang git rpm-build make gzip 'dnf-command(builddep)' && \
+RUN dnf install -y which clang git rpm-build make gzip 'dnf-command(builddep)' && \
     # pmdabind2
     dnf install -y perl-XML-LibXML perl-File-Slurp && \
     dnf builddep -y build/rpm/redhat.spec && \
